@@ -115,6 +115,13 @@
 #     )
 
 # File: src/app.py
+# ─── Kaleido headless Chrome bootstrap ───
+try:
+    import kaleido
+    kaleido.get_chrome_sync()
+except Exception:
+    pass
+# ───────────────────────────────────────────
 
 import streamlit as st
 # 1) Set Streamlit’s page configuration BEFORE any other Streamlit calls:
@@ -229,14 +236,6 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-# ─── Ensure Kaleido can find its headless Chrome ───
-try:
-    import kaleido
-    # This will download a private copy of Chromium into ~/.kaleido if needed
-    kaleido.get_chrome_sync()
-except Exception as e:
-    # If it still fails, we'll surface that later when calling to_image()
-    pass
 
 import pandas as pd
 import numpy as np
