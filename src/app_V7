@@ -1,19 +1,17 @@
 
-# This is attempt 1 of incorporating the moving averages option into the code - 20/08/2025
+# This is the final version of the code before moving averages have been incorporated - 20/08/2025
 
 
 # ─── Kaleido headless Chrome bootstrap ───
-if os.environ.get("ENABLE_KALEIDO_BOOTSTRAP") == "1":
-    try:
-        import kaleido
-        kaleido.get_chrome_sync()
-    except Exception:
-        pass
-# ─────────────────────────────────────────
+try:
+    import kaleido
+    kaleido.get_chrome_sync()
+except Exception:
+    pass
+# ───────────────────────────────────────────
 
 import streamlit as st
 st.set_page_config(layout="wide")  # must be the first Streamlit call
-st.set_option("client.showErrorDetails", True)
 
 # 1) Set Streamlit’s page configuration BEFORE any other Streamlit calls:
 st.markdown("""
@@ -434,17 +432,15 @@ def make_title(
     region_map: dict,
     applied_month_range: tuple | None,
     powertrains: list | None = None,
-    where_override: str | None = None,
-    ma_window: int | None = None,   # <<< NEW
+    where_override: str | None = None
 ) -> str:
     who = _who_label(applied_oems, applied_brands)
     geo = _geo_label(applied_regions, applied_countries, region_map, where_override)
     span = _span_label(applied_month_range)
     pt   = _powertrain_label(powertrains)
-    ma   = smoothing_suffix(ma_window)  # <<< NEW
 
     head = f"{who} - {what}" if who else what
-    tail_bits = [geo, pt, span, ma]     # <<< include suffix here
+    tail_bits = [geo, pt, span]
     tail = " | ".join([b for b in tail_bits if b])
     return f"{head} | {tail}" if tail else head
 
@@ -688,6 +684,8 @@ oem_group_map = {
 
 # =============================================== Load and Prepare Data ======================================================================================================
 
+
+
 from pathlib import Path  # (you already import this above; ok to keep)
 
 CACHE = Path(__file__).resolve().parent.parent / ".cache" / "long.parquet"
@@ -723,15 +721,9 @@ try:
                 "`python tools/build_cache.py`"
             )
     else:
-        # Cache missing: stop with a clear instruction instead of rebuilding from Excel
-        st.error("Cache file missing: `.cache/long.parquet`")
-        st.info(
-            "Build it locally with:\n\n"
-            "`python tools/build_cache.py`\n\n"
-            "Then commit/upload the entire `.cache` folder (including "
-            "`long.parquet` and `.manifest.json`)."
-        )
-        st.stop()
+        # Fallback if cache missing
+        df = load_and_prepare(DATA_VERSION).copy()
+        st.success(f"Loaded {len(df):,} rows (no cache found).")
 
 except Exception as e:
     st.error(f"❌ Failed to load data: {e}")
@@ -739,48 +731,26 @@ except Exception as e:
     st.stop()
 
 
-# --- Brand Map ---
 
-# Ensure required columns are present
-required_cols = {"yyyymm", "total_sales", "country"}
-missing = required_cols - set(df.columns)
-if missing:
-    st.set_option("client.showErrorDetails", True)
-    st.error(f"Data is missing required column(s): {sorted(missing)}")
-    st.stop()
+# ——— Brand Map ———
 
-# Create optional columns if absent
-for col in ["maker_brand", "group", "powertrain_simplified"]:
-    if col not in df.columns:
-        df[col] = ""
 
-# Normalize maker_brand
-df["maker_brand"] = df["maker_brand"].astype(str).str.strip().str.upper()
 
-# Flatten OEM group map
-flat_oem_map = {
-    raw: clean
-    for clean, raw_list in oem_group_map.items()
-    for raw in raw_list
-}
 
-# Apply OEM standardization safely
-df["group_standardized"] = (
-    df["group"].astype(str).map(flat_oem_map).fillna(df["group"]).astype(str).str.strip()
+df["maker_brand"] = df["maker_brand"].str.strip().str.upper()
+df["group_standardized"] = df["group"].map({
+    oem_raw: oem_clean
+    for oem_clean, raw_list in oem_group_map.items()
+    for oem_raw in raw_list
+}).fillna(df["group"]).str.strip()
+
+brand_to_oem = (
+    df[["maker_brand", "group_standardized"]]
+    .dropna()
+    .drop_duplicates()
+    .set_index("maker_brand")["group_standardized"]
+    .to_dict()
 )
-
-# Build brand→OEM mapping if possible
-brand_to_oem = {}
-if {"maker_brand", "group_standardized"}.issubset(df.columns):
-    brand_to_oem = (
-        df[["maker_brand", "group_standardized"]]
-        .dropna()
-        .drop_duplicates()
-        .set_index("maker_brand")["group_standardized"]
-        .to_dict()
-    )
-else:
-    brand_to_oem = {}
 
 
 # ——— Powertrain Map ———
@@ -975,11 +945,6 @@ viz_help = (
 )
 selected_viz = st.sidebar.selectbox("Data Visualisation", options=viz_choices, index=0, help=viz_help, key="viz_choice")
 
-# ---- Moving Average control (global for time-dependent charts) ----
-MA_CHOICES = {"Raw": None, "3-Month MA": 3, "6-Month MA": 6, "12-Month MA": 12}
-selected_ma_label = st.sidebar.selectbox("Moving Average", list(MA_CHOICES.keys()), index=0)
-selected_ma_window = MA_CHOICES[selected_ma_label]
-
 # Persist context for chart step
 st.session_state["viz_time_grain"] = "monthly"
 st.session_state["viz_is_internal"] = "Internal" in selected_viz
@@ -1000,8 +965,6 @@ if do_search:
         "month_range": selected_month_range,   # ('YYYYMM','YYYYMM')
         "viz_choice": selected_viz,
         "time_grain": "monthly",
-        "ma_window": selected_ma_window,
-        "ma_label": selected_ma_label,
     }
 
 # Small spacer so Search sits visually above Reset
@@ -1057,8 +1020,6 @@ applied_powertrains  = applied.get("powertrains", [])
 applied_month_range  = applied.get("month_range", None)
 applied_time_grain   = applied.get("time_grain", "monthly")
 applied_viz_choice   = applied.get("viz_choice", "Sales — Internal")
-applied_ma_window = applied.get("ma_window", None)
-applied_ma_label  = applied.get("ma_label", "Raw")
 
 # Rebuild filtered frame
 df_applied = df.copy()
@@ -1282,99 +1243,6 @@ def _style_fig(fig, *, pie=False, top_margin=90):
         fig.update_traces(textfont=dict(color="black"))
     return fig
 
-# ----------- Moving average helpers -----------
-
-def month_span_len(applied_month_range: tuple[str,str] | None) -> int:
-    """Inclusive count of months in ('YYYYMM','YYYYMM')."""
-    if not applied_month_range: 
-        return 0
-    s, e = map(int, applied_month_range)
-    sy, sm = divmod(s, 100); ey, em = divmod(e, 100)
-    return (ey - sy) * 12 + (em - sm) + 1
-
-def apply_trailing_ma(
-    df: pd.DataFrame,
-    *,
-    group_cols: list[str],
-    date_col: str,
-    value_col: str,
-    window: int
-) -> pd.DataFrame:
-    """
-    Strict trailing MA: include current month, require full window (min_periods=window).
-    Adds f"{value_col}_ma" aligned with the original rows.
-    Handles categoricals with unused categories to avoid empty-group rolling errors.
-    """
-    if not window or window < 2 or df.empty:
-        out = df.copy()
-        out[f"{value_col}_ma"] = np.nan
-        return out
-
-    out = df.copy()
-
-    # 1) Drop unused categories on all grouping cols (prevents empty groups)
-    for c in group_cols:
-        if c in out.columns and pd.api.types.is_categorical_dtype(out[c]):
-            out[c] = out[c].cat.remove_unused_categories()
-
-    # 2) Sort for stable rolling
-    out = out.sort_values(group_cols + [date_col])
-
-    # 3) Safe rolling (guard s.empty)
-    def _safe_roll(s: pd.Series) -> pd.Series:
-        if s.empty:
-            return pd.Series(np.nan, index=s.index)
-        return s.rolling(window=window, min_periods=window).mean()
-
-    # 4) observed=True avoids empty categorical groups entirely
-    out[f"{value_col}_ma"] = (
-        out.groupby(group_cols, observed=True, group_keys=False)[value_col]
-           .transform(_safe_roll)
-    )
-    return out
-
-def first_common_valid_ma(df: pd.DataFrame, *, group_col: str, date_col: str, value_ma_col: str) -> pd.DataFrame:
-    """
-    For stacked bars: start where ALL series have a valid MA.
-    Returns df filtered to >= max(first_valid_index per series).
-    """
-    if df.empty: 
-        return df
-    firsts = (
-        df.dropna(subset=[value_ma_col])
-          .groupby(group_col)[date_col].min()
-    )
-    if firsts.empty or len(firsts) == 0:
-        return df.iloc[0:0]
-    common_start = firsts.max()
-    return df[df[date_col] >= common_start].copy()
-
-def smoothing_suffix(n: int | None) -> str:
-    return "" if not n or n < 2 else f"{n}-Month Moving Average"
-
-def _effective_ma_win(applied_ma_window, applied_month_range) -> int | None:
-    """
-    Global rule:
-    - Single-month -> raw
-    - If selected span < N -> raw + yellow note
-    - Else -> N
-    """
-    if not applied_ma_window:
-        return None
-    # single-month always raw
-    if applied_month_range and applied_month_range[0] == applied_month_range[1]:
-        show_warning_black(f"Need at least {int(applied_ma_window)} months for the selected smoothing.")
-        return None
-    need = int(applied_ma_window)
-    have = month_span_len(applied_month_range)
-    if have < need:
-        show_warning_black(f"Need at least {need} months for the selected smoothing.")
-        return None
-    return need
-
-
-
-
 # ====================================================================== Sales — Internal ======================================================================
 
 def render_sales_internal(
@@ -1469,21 +1337,9 @@ def render_sales_internal(
         # 1) Trend line (monthly)
         view_df = monthly_seg.sort_values("period_dt")
         if not single_month:
-            eff_win = _effective_ma_win(applied_ma_window, applied_month_range)
-            data_for_line = view_df.sort_values("period_dt").copy()
-            y_col = "total_sales"
-            if eff_win:
-                data_for_line = apply_trailing_ma(
-                    data_for_line, group_cols=[PLOT_COL], date_col="period_dt",
-                    value_col="total_sales", window=eff_win
-                )
-                y_col = "total_sales_ma"
-
             fig_line = px.line(
-                data_for_line,
-                x="period_dt",
-                y=y_col,
-                color=PLOT_COL,
+                view_df,
+                x="period_dt", y="total_sales", color=PLOT_COL,
                 color_discrete_map=color_map,
                 category_orders={PLOT_COL: segments},
                 template="plotly_white",
@@ -1498,20 +1354,8 @@ def render_sales_internal(
                     applied_month_range=applied_month_range,
                     powertrains=pts_for_title,
                     where_override="Global" if is_global else None,
-                    ma_window=eff_win,
-                ),
-                # attach per-row custom data here (trace-specific)
-                custom_data=["total_sales"]
+                )
             )
-
-            if eff_win:
-                fig_line.update_traces(
-                    hovertemplate="Month: %{x|%m/%Y}<br>Smoothed: %{y:,.0f}<br>Actual: %{customdata[0]:,.0f}<extra></extra>"
-                )
-            else:
-                fig_line.update_traces(
-                    hovertemplate="Month: %{x|%m/%Y}<br>Units: %{y:,.0f}<extra></extra>"
-                )
             fig_line.update_layout(
                 yaxis=dict(tickformat=","),
                 legend=dict(title="", orientation="h", yanchor="bottom", y=1.12, xanchor="right", x=1)
@@ -1584,26 +1428,12 @@ def render_sales_internal(
             st.plotly_chart(_style_fig(fig_barh), use_container_width=True)
         else:
             # 2b) Multi-month stacked bars (monthly)
-            eff_win = _effective_ma_win(applied_ma_window, applied_month_range)
-
-            # base data (raw monthly, by segment)
-            bar_df = view_df.sort_values("period_dt").copy()
-            y_col = "total_sales"
-
-            if eff_win:
-                # add moving average per segment and trim to first month where ALL have a value
-                bar_df = apply_trailing_ma(
-                    bar_df, group_cols=[PLOT_COL], date_col="period_dt",
-                    value_col="total_sales", window=eff_win
-                )
-                bar_df = first_common_valid_ma(
-                    bar_df, group_col=PLOT_COL, date_col="period_dt", value_ma_col="total_sales_ma"
-                )
-                y_col = "total_sales_ma"
-
-            # ---------- build the chart ----------
+            monthly_totals = (
+                view_df.groupby("period_dt", as_index=False)["total_sales"].sum()
+                .sort_values("period_dt")
+            )            
             fig_bar = px.bar(
-                bar_df, x="period_dt", y=y_col, color=PLOT_COL, barmode="stack",
+                view_df, x="period_dt", y="total_sales", color=PLOT_COL, barmode="stack",
                 color_discrete_map=color_map,
                 category_orders={PLOT_COL: segments},
                 template="plotly_white",
@@ -1618,77 +1448,27 @@ def render_sales_internal(
                     applied_month_range=applied_month_range,
                     powertrains=pts_for_title,
                     where_override="Global" if is_global else None,
-                    ma_window=eff_win,
-                ),
+                )
             )
 
-            # Per-bar hover: (MA) + Actual (raw)
-            if eff_win:
-                fig_bar.update_traces(
-                    customdata=bar_df[["total_sales"]],
-                    hovertemplate=(
-                        "Month: %{x|%m/%Y}<br>%{fullData.name}: %{y:,.0f} (MA)"
-                        "<br>Actual: %{customdata[0]:,.0f}<extra></extra>"
-                    )
-                )
-            else:
-                # Raw mode: only show the raw value for each bar
-                fig_bar.update_traces(
-                    hovertemplate="Month: %{x|%m/%Y}<br>%{fullData.name}: %{y:,.0f}<extra></extra>"
-                )
-
-            # ---------- unified bottom totals ----------
-            # We want the totals aligned to the months actually present in bar_df after any trimming.
-            months_shown = (
-                bar_df[["period_dt"]]
-                .drop_duplicates()
-                .sort_values("period_dt")
-            )
-
-            # Actual total per month (raw)
-            tot_actual = (
-                view_df.groupby("period_dt", as_index=False)["total_sales"].sum()
-                .rename(columns={"total_sales": "total_actual"})
-                .merge(months_shown, on="period_dt", how="right")   # align to months in the plot
-                .sort_values("period_dt")
-            )
-
-            # Ave (MA) total per month – only when smoothing is on
-            if eff_win:
-                tot_ma = (
-                    bar_df.groupby("period_dt", as_index=False)[y_col].sum()
-                    .rename(columns={y_col: "total_ma"})
-                    .sort_values("period_dt")
-                )
-
-                # invisible MA total trace (for unified tooltip)
-                fig_bar.add_scatter(
-                    x=tot_ma["period_dt"],
-                    y=tot_ma["total_ma"],
-                    mode="lines",
-                    line=dict(width=0),
-                    opacity=0,
-                    showlegend=False,
-                    hovertemplate="Ave: %{y:,.0f}<extra></extra>",
-                )
-
-            # invisible Actual total trace (for unified tooltip)
+            # Add an invisible totals trace so the unified hover shows "Total: ..."
             fig_bar.add_scatter(
-                x=tot_actual["period_dt"],
-                y=tot_actual["total_actual"],
+                x=monthly_totals["period_dt"],
+                y=monthly_totals["total_sales"],
                 mode="lines",
-                line=dict(width=0),
-                opacity=0,
+                line=dict(width=0),           # no line drawn
+                opacity=0,                    # fully transparent
                 showlegend=False,
-                hovertemplate="Actual: %{y:,.0f}<extra></extra>",
+                hovertemplate="Total: %{y:,.0f}<extra></extra>",
             )
 
-            # unified hover formatting
+            # Make the hover a single tooltip for the x-position
             fig_bar.update_layout(
                 hovermode="x unified",
                 yaxis=dict(tickformat=","),
                 legend=dict(title="", orientation="h", yanchor="bottom", y=1.06, xanchor="right", x=1)
             )
+            fig_bar.update_traces(hovertemplate="Month: %{x|%m/%Y}<br>Units: %{y:,.0f}<extra></extra>")
             fig_bar.update_xaxes(tickformat="%m/%Y")
 
             st.plotly_chart(_style_fig(fig_bar), use_container_width=True)
@@ -1720,21 +1500,9 @@ def render_sales_internal(
                 )
             )
 
-            eff_win = _effective_ma_win(applied_ma_window, applied_month_range)
-            pt_view = monthly_pt.sort_values("period_dt").copy()
-            y_col = "total_sales"
-            if eff_win:
-                pt_view = apply_trailing_ma(
-                    pt_view, group_cols=["powertrain_simplified"], date_col="period_dt",
-                    value_col="total_sales", window=eff_win
-                )
-                y_col = "total_sales_ma"
-
             fig_line_pt = px.line(
-                pt_view,
-                x="period_dt",
-                y=y_col,
-                color="powertrain_simplified",
+                monthly_pt.sort_values("period_dt"),
+                x="period_dt", y="total_sales", color="powertrain_simplified",
                 template="plotly_white",
                 labels={"total_sales": "Unit Sales", "period_dt": "Month", "powertrain_simplified": "Powertrain"},
                 title=make_title(
@@ -1747,31 +1515,13 @@ def render_sales_internal(
                     applied_month_range=applied_month_range,
                     powertrains=pts_for_title,
                     where_override="Global" if is_global else None,
-                    ma_window=eff_win,   # add MA suffix
                 ),
-                # IMPORTANT: attach row-level raw units so each trace gets the correct "Actual"
-                custom_data=["total_sales"]
             )
-
             fig_line_pt.update_layout(
                 yaxis=dict(tickformat=","),
                 legend=dict(title="", orientation="h", yanchor="bottom", y=1.12, xanchor="right", x=1),
             )
             fig_line_pt.update_xaxes(tickformat="%m/%Y")
-
-            # Dual hover when smoothed
-            if eff_win:
-                fig_line_pt.update_traces(
-                    hovertemplate=(
-                        "Month: %{x|%m/%Y}<br>Smoothed: %{y:,.0f}"
-                        "<br>Actual: %{customdata[0]:,.0f}<extra></extra>"
-                    )
-                )
-            else:
-                fig_line_pt.update_traces(
-                    hovertemplate="Month: %{x|%m/%Y}<br>Units: %{y:,.0f}<extra></extra>"
-                )
-
             st.plotly_chart(_style_fig(fig_line_pt), use_container_width=True)
 
     # Combine selected powertrains into one dataset, then render once
@@ -1936,46 +1686,13 @@ def render_sales_competitive(
         # 1) Line (exclude "Other")
         line_df = monthly_oem[monthly_oem["OEM_adj"] != "Other"].sort_values("period_dt")
         if not line_df.empty:
-            eff_win = _effective_ma_win(applied_ma_window, applied_month_range)
-            data_for_line = line_df.sort_values("period_dt").copy()
-            y_col = "total_sales"
-            if eff_win:
-                data_for_line = apply_trailing_ma(
-                    data_for_line, group_cols=["OEM_adj"], date_col="period_dt",
-                    value_col="total_sales", window=eff_win
-                )
-                y_col = "total_sales_ma"
-
             fig_line = px.line(
-                data_for_line,
-                x="period_dt",
-                y=y_col,
-                color="OEM_adj",
-                color_discrete_map=color_map,
-                category_orders={"OEM_adj": seg_order},
+                line_df, x="period_dt", y="total_sales", color="OEM_adj",
+                color_discrete_map=color_map, category_orders={"OEM_adj": seg_order},
                 template="plotly_white",
                 labels={"total_sales": "Unit Sales", "period_dt": "Month", "OEM_adj": "OEM"},
-                title=make_title(
-                    "Competitive Sales by OEM",
-                    applied_oems=applied_oems,
-                    applied_brands=[],
-                    applied_regions=[] if global_flag else applied_regions,
-                    applied_countries=applied_countries,
-                    region_map=region_map,
-                    applied_month_range=applied_month_range,
-                    powertrains=chosen_pts or None,
-                    where_override="Global" if global_flag else None,
-                    ma_window=eff_win,
-                ),
-                custom_data=["total_sales"]   # attach here
+                title=title_line
             )
-
-            if eff_win:
-                fig_line.update_traces(
-                    hovertemplate="Month: %{x|%m/%Y}<br>Smoothed: %{y:,.0f}<br>Actual: %{customdata[0]:,.0f}<extra></extra>"
-                )
-            else:
-                fig_line.update_traces(hovertemplate="Month: %{x|%m/%Y}<br>Units: %{y:,.0f}<extra></extra>")
             fig_line.update_layout(
                 yaxis=dict(tickformat=","), legend=dict(title="", orientation="h", yanchor="bottom", y=1.12, xanchor="right", x=1)
             )
@@ -1983,59 +1700,22 @@ def render_sales_competitive(
             st.plotly_chart(_style_fig(fig_line), use_container_width=True)
 
         # 2) Stacked bar (one combined “Other”, with period totals in hover)
-        eff_win = _effective_ma_win(applied_ma_window, applied_month_range)
         bar_df = monthly_oem.sort_values("period_dt").copy()
-        y_col = "total_sales"
-
-        if eff_win:
-            bar_df = apply_trailing_ma(
-                bar_df, group_cols=["OEM_adj"], date_col="period_dt",
-                value_col="total_sales", window=eff_win
-            )
-            bar_df = first_common_valid_ma(
-                bar_df, group_col="OEM_adj", date_col="period_dt", value_ma_col="total_sales_ma"
-            )
-            y_col = "total_sales_ma"
-
-        # period totals based on the plotted y_col (raw or MA)
-        bar_df["period_total_plot"] = bar_df.groupby("period_dt")[y_col].transform("sum")
-
+        bar_df["period_total"] = bar_df.groupby("period_dt")["total_sales"].transform("sum")
         fig_bar = px.bar(
-            bar_df, x="period_dt", y=y_col, color="OEM_adj", barmode="stack",
+            bar_df, x="period_dt", y="total_sales", color="OEM_adj", barmode="stack",
             color_discrete_map=color_map, category_orders={"OEM_adj": seg_order},
             template="plotly_white",
             labels={"total_sales": "Unit Sales", "period_dt": "Month", "OEM_adj": "OEM"},
-            title=make_title(
-                "Monthly Sales by OEM (stacked)",
-                applied_oems=applied_oems,
-                applied_brands=[],
-                applied_regions=[] if global_flag else applied_regions,
-                applied_countries=applied_countries,
-                region_map=region_map,
-                applied_month_range=applied_month_range,
-                powertrains=chosen_pts or None,
-                where_override="Global" if global_flag else None,
-                ma_window=eff_win,
-            ),
-            custom_data=["period_total_plot", "total_sales"]  # total for tooltip + raw value for dual hover
+            title=title_bar,
+            custom_data=["period_total"]
         )
-
-        if eff_win:
-            fig_bar.update_traces(
-                hovertemplate=(
-                    "%{x|%m/%Y}<br>%{fullData.name}: %{y:,.0f} (MA)"
-                    "<br>Actual: %{customdata[1]:,.0f}"
-                    "<br>Total: %{customdata[0]:,.0f}<extra></extra>"
-                )
+        fig_bar.update_traces(
+            hovertemplate=(
+                "%{x|%m/%Y}<br>%{fullData.name}: %{y:,.0f}<br>"
+                "Total: %{customdata[0]:,.0f}<extra></extra>"
             )
-        else:
-            fig_bar.update_traces(
-                hovertemplate=(
-                    "%{x|%m/%Y}<br>%{fullData.name}: %{y:,.0f}"
-                    "<br>Total: %{customdata[0]:,.0f}<extra></extra>"
-                )
-            )
-
+        )
         fig_bar.update_layout(
             yaxis=dict(tickformat=","), legend=dict(title="", orientation="h", yanchor="bottom", y=1.06, xanchor="right", x=1)
         )
@@ -2056,21 +1736,9 @@ def render_sales_competitive(
                     monthly_pt["year"].astype(str) + monthly_pt["month"].astype(str).str.zfill(2), format="%Y%m"
                 )
             )
-            eff_win = _effective_ma_win(applied_ma_window, applied_month_range)
-            pt_view = monthly_pt.sort_values("period_dt").copy()
-            y_col = "total_sales"
-            if eff_win:
-                pt_view = apply_trailing_ma(
-                    pt_view, group_cols=["powertrain_simplified"], date_col="period_dt",
-                    value_col="total_sales", window=eff_win
-                )
-                y_col = "total_sales_ma"
-                # strict window: drop pre-window NaNs so the line starts at first valid MA
-                pt_view = pt_view.dropna(subset=[y_col])
-
             fig_pt = px.line(
-                pt_view,
-                x="period_dt", y=y_col, color="powertrain_simplified",
+                monthly_pt.sort_values("period_dt"),
+                x="period_dt", y="total_sales", color="powertrain_simplified",
                 template="plotly_white",
                 labels={"total_sales":"Unit Sales", "period_dt":"Month", "powertrain_simplified":"Powertrain"},
                 title=make_title(
@@ -2083,21 +1751,11 @@ def render_sales_competitive(
                     applied_month_range=applied_month_range,
                     powertrains=chosen_pts,
                     where_override="Global" if global_flag else None,
-                    ma_window=eff_win,
                 )
             )
             fig_pt.update_layout(legend=dict(title="", orientation="h", yanchor="bottom", y=1.12, xanchor="right", x=1))
             fig_pt.update_yaxes(tickformat=",")
             fig_pt.update_xaxes(tickformat="%m/%Y")
-
-            if eff_win:
-                fig_pt.update_traces(
-                    customdata=pt_view[["total_sales"]],
-                    hovertemplate="Month: %{x|%m/%Y}<br>Smoothed: %{y:,.0f}<br>Actual: %{customdata[0]:,.0f}<extra></extra>"
-                )
-            else:
-                fig_pt.update_traces(hovertemplate="Month: %{x|%m/%Y}<br>Units: %{y:,.0f}<extra></extra>")
-
             st.plotly_chart(_style_fig(fig_pt), use_container_width=True)
 
     # ---------------------------- SINGLE MONTH ---------------------------
@@ -2342,18 +2000,8 @@ def render_share_internal(
         view = monthly.dropna(subset=["share"]).sort_values(["period_dt", PLOT_COL])
 
         # 1) Line: Market share over time by segment
-        eff_win = _effective_ma_win(applied_ma_window, applied_month_range)
-        line_df = view.dropna(subset=["share"]).sort_values(["period_dt", PLOT_COL]).copy()
-        y_col = "share"
-        if eff_win:
-            line_df = apply_trailing_ma(
-                line_df, group_cols=[PLOT_COL], date_col="period_dt",
-                value_col="share", window=eff_win
-            )
-            y_col = "share_ma"
-
         fig_line = px.line(
-            line_df, x="period_dt", y=y_col, color=PLOT_COL,
+            view, x="period_dt", y="share", color=PLOT_COL,
             color_discrete_map=color_map, category_orders={PLOT_COL: segments},
             template="plotly_white",
             labels={"share":"Market Share", "period_dt":"Month", PLOT_COL: PLOT_COL.title()},
@@ -2367,28 +2015,10 @@ def render_share_internal(
                 applied_month_range=applied_month_range,
                 powertrains=chosen_pts or None,
                 where_override="Global" if global_flag else None,
-                ma_window=eff_win,
             ),
-            # Always carry raw share + units for hover
-            custom_data=["share", "num", "den"],
+            custom_data=["num", "den"]
         )
-        if eff_win:
-            fig_line.update_traces(
-                hovertemplate=(
-                    "Month: %{x|%m/%Y}<br>Smoothed: %{y:.1%}"
-                    "<br>Actual: %{customdata[0]:.1%}"
-                    "<br>OEM Units: %{customdata[1]:,.0f}"
-                    "<br>Market Units: %{customdata[2]:,.0f}<extra></extra>"
-                )
-            )
-        else:
-            fig_line.update_traces(
-                hovertemplate=(
-                    "Month: %{x|%m/%Y}<br>Share: %{y:.1%}"
-                    "<br>OEM Units: %{customdata[1]:,.0f}"
-                    "<br>Market Units: %{customdata[2]:,.0f}<extra></extra>"
-                )
-            )
+        fig_line.update_traces(hovertemplate="Month: %{x|%m/%Y}<br>Share: %{y:.1%}<br>OEM Units: %{customdata[0]:,.0f}<br>Market Units: %{customdata[1]:,.0f}<extra></extra>")
         fig_line.update_yaxes(tickformat=".0%")
         fig_line.update_xaxes(tickformat="%m/%Y")
         fig_line.update_layout(legend=dict(title="", orientation="h", yanchor="bottom", y=1.12, xanchor="right", x=1))
@@ -2466,19 +2096,9 @@ def render_share_internal(
             pt_share = pt_share.assign(
                 period_dt=pd.to_datetime(pt_share["year"].astype(str)+pt_share["month"].astype(str).str.zfill(2), format="%Y%m")
             ).sort_values("period_dt")
-            eff_win = _effective_ma_win(applied_ma_window, applied_month_range)
-            pt_line = pt_share.dropna(subset=["share"]).sort_values("period_dt").copy()
-            y_col = "share"
-            if eff_win:
-                pt_line = apply_trailing_ma(
-                    pt_line, group_cols=["powertrain_simplified"], date_col="period_dt",
-                    value_col="share", window=eff_win
-                )
-                y_col = "share_ma"
-
             fig_pt = px.line(
-                pt_line,
-                x="period_dt", y=y_col, color="powertrain_simplified",
+                pt_share.dropna(subset=["share"]),
+                x="period_dt", y="share", color="powertrain_simplified",
                 template="plotly_white",
                 labels={"share":"Market Share", "period_dt":"Month", "powertrain_simplified":"Powertrain"},
                 title=make_title(
@@ -2491,24 +2111,10 @@ def render_share_internal(
                     applied_month_range=applied_month_range,
                     powertrains=chosen_pts,
                     where_override="Global" if global_flag else None,
-                    ma_window=eff_win,
                 ),
                 custom_data=["num","den"]
             )
-            if eff_win:
-                # Keep num/den hover the same; add smoothed vs actual via y/customdata if needed,
-                # but since % is derived, we keep OEM/Market units in customdata as you already do.
-                fig_pt.update_traces(
-                    hovertemplate=("Month: %{x|%m/%Y}<br>Smoothed: %{y:.1%}"
-                                "<br>OEM Units: %{customdata[0]:,.0f}"
-                                "<br>Market Units: %{customdata[1]:,.0f}<extra></extra>")
-                )
-            else:
-                fig_pt.update_traces(
-                    hovertemplate=("Month: %{x|%m/%Y}<br>Share: %{y:.1%}"
-                                "<br>OEM Units: %{customdata[0]:,.0f}"
-                                "<br>Market Units: %{customdata[1]:,.0f}<extra></extra>")
-                )
+            fig_pt.update_traces(hovertemplate="Month: %{x|%m/%Y}<br>Share: %{y:.1%}<br>OEM Units: %{customdata[0]:,.0f}<br>Market Units: %{customdata[1]:,.0f}<extra></extra>")
             fig_pt.update_yaxes(tickformat=".0%")
             fig_pt.update_xaxes(tickformat="%m/%Y")
             fig_pt.update_layout(legend=dict(title="", orientation="h", yanchor="bottom", y=1.12, xanchor="right", x=1))
@@ -2694,48 +2300,17 @@ def render_share_competitive(
         # 1) Line chart (NEVER show 'Other')
         line_df = shares[shares["group_standardized"].isin(keep)].dropna(subset=["share"]).sort_values("period_dt")
         if not line_df.empty:
-            eff_win = _effective_ma_win(applied_ma_window, applied_month_range)
-            data_for_line = line_df.sort_values("period_dt").copy()
-            y_col = "share"
-            if eff_win:
-                data_for_line = apply_trailing_ma(
-                    data_for_line, group_cols=["group_standardized"], date_col="period_dt",
-                    value_col="share", window=eff_win
-                )
-                y_col = "share_ma"
-
             fig_line = px.line(
-                data_for_line, x="period_dt", y=y_col, color="group_standardized",
+                line_df, x="period_dt", y="share", color="group_standardized",
                 color_discrete_map=color_map, category_orders={"group_standardized": seg_order},
                 template="plotly_white",
                 labels={"share":"Market Share", "period_dt":"Month", "group_standardized":"OEM"},
-                title=make_title(
-                    "Competitive Market Share by OEM",
-                    applied_oems=applied_oems,
-                    applied_brands=[],
-                    applied_regions=[] if global_flag else applied_regions,
-                    applied_countries=applied_countries,
-                    region_map=region_map,
-                    applied_month_range=applied_month_range,
-                    powertrains=chosen_pts or None,
-                    where_override="Global" if global_flag else None,
-                    ma_window=eff_win,
-                ),
+                title=title_line,
                 custom_data=["total_sales","market_total"]
             )
-            if eff_win:
-                fig_line.update_traces(
-                    customdata=np.c_[data_for_line["total_sales"], data_for_line["market_total"]],
-                    hovertemplate=("Month: %{x|%m/%Y}<br>%{fullData.name}: %{y:.1%}"
-                                "<br>OEM Units: %{customdata[0]:,.0f}"
-                                "<br>Market Units: %{customdata[1]:,.0f}<extra></extra>")
-                )
-            else:
-                fig_line.update_traces(
-                    hovertemplate=("Month: %{x|%m/%Y}<br>%{fullData.name}: %{y:.1%}"
-                                "<br>OEM Units: %{customdata[0]:,.0f}"
-                                "<br>Market Units: %{customdata[1]:,.0f}<extra></extra>")
-                )
+            fig_line.update_traces(
+                hovertemplate="Month: %{x|%m/%Y}<br>%{fullData.name}: %{y:.1%}<br>OEM Units: %{customdata[0]:,.0f}<br>Market Units: %{customdata[1]:,.0f}<extra></extra>"
+            )
             fig_line.update_yaxes(tickformat=".0%")
             fig_line.update_xaxes(tickformat="%m/%Y")
             fig_line.update_layout(legend=dict(title="", orientation="h", yanchor="bottom", y=1.12, xanchor="right", x=1))

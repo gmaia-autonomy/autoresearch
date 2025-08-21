@@ -1,11 +1,9 @@
-
 [server]
+address = "0.0.0.0"
+port = 8501
+headless = true
 enableCORS = false
-
-[theme]
-base="dark"                              # use Streamlit’s built‐in dark base
-primaryColor="#0099ff"                   # bright “Bloomberg blue” accent
-backgroundColor="#0d0f14"                # deep dark background
-secondaryBackgroundColor="#1a1c21"       # slightly lighter panel background
-textColor="#e6e6e6"                      # off‐white text
-font="sans serif"                        # will override in CSS with a sleek font
+enableXsrfProtection = false
+fileWatcherType = "none"
+[browser]
+gatherUsageStats = false

@@ -1,0 +1,690 @@
+# # File: src/app.py
+
+# import streamlit as st
+# import pandas as pd
+# import numpy as np
+# import re
+# from pathlib import Path
+
+# @st.cache_data
+# def load_and_prepare():
+#     # 1) Load all Excel sheets
+#     RAW_DIR = Path(__file__).parent.parent / "data" / "raw"
+#     all_dfs = []
+#     for file in RAW_DIR.glob("*.xlsx"):
+#         sheets = pd.read_excel(file, sheet_name=None, header=1)
+#         for name, df in sheets.items():
+#             # normalize headers
+#             df.columns = (
+#                 df.columns
+#                   .astype(str)
+#                   .str.strip()
+#                   .str.lower()
+#                   .str.replace(" ", "_")
+#                   .str.replace("/", "_")
+#             )
+#             df["source_file"] = file.name
+#             df["sheet_name"]  = name
+#             all_dfs.append(df)
+
+#     # 2) Combine & fill
+#     combined = pd.concat(all_dfs, ignore_index=True).fillna(0)
+
+#     # 3) Pivot monthly columns into long form
+#     date_cols = [c for c in combined.columns if re.match(r"^\d{6}$", c)]
+#     id_cols   = [c for c in combined.columns if c not in date_cols]
+
+#     long = combined.melt(
+#         id_vars=id_cols,
+#         value_vars=date_cols,
+#         var_name="yyyymm",
+#         value_name="total_sales"
+#     )
+
+#     # 4) Clean and convert total_sales to float, treating dashes as zero
+#     long["total_sales"] = (
+#         long["total_sales"]
+#           .astype(str)
+#           .str.strip()
+#           .replace(r"^-+$", "0", regex=True)           # dash-only cells → "0"
+#           .str.replace(r"[^\d\.-]", "", regex=True)     # drop non-numeric chars
+#           .replace("", "0")                             # empty → "0"
+#           .astype(float)
+#     )
+
+#     # 5) Extract year and month
+#     long["year"]  = long["yyyymm"].str[:4].astype(int)
+#     long["month"] = long["yyyymm"].str[4:].astype(int)
+
+#     return long
+
+# def apply_ev_policy(df, country, mandate_year, adoption_pct):
+#     ts = df["total_sales"]
+#     mask = (
+#         df["country"].str.lower() == country.lower()
+#     ) & (
+#         df["year"] >= mandate_year
+#     )
+#     ev = np.where(mask, ts * adoption_pct, 0.0)
+#     ice = ts - ev
+#     return df.assign(ev_sales=ev, ice_sales=ice)
+
+# # ——— Streamlit UI ———————————————————————————————————
+
+# df = load_and_prepare()
+# st.title("🚗 Global Car-Market Explorer")
+
+# oem     = st.sidebar.selectbox("OEM / Brand", sorted(df["maker_brand"].unique()))
+# country = st.sidebar.selectbox("Country",      sorted(df["country"].unique()))
+# year    = st.sidebar.slider("Year",
+#                             int(df.year.min()),
+#                             int(df.year.max()),
+#                             int(df.year.max()))
+# ev_pct  = st.sidebar.slider("EV adoption (%)", 0, 100, 0) / 100.0
+
+# sub = df[(df.maker_brand == oem) &
+#          (df.country     == country) &
+#          (df.year        == year)]
+
+# if sub.empty:
+#     st.warning("No data for that selection.")
+# else:
+#     base    = sub["total_sales"].sum()
+#     sub_adj = apply_ev_policy(sub.copy(), country, year, ev_pct)
+#     adj     = sub_adj["ev_sales"].sum() + sub_adj["ice_sales"].sum()
+
+#     col1, col2 = st.columns(2)
+#     col1.metric("Base Total Sales",     int(base))
+#     col2.metric("Adjusted Total Sales", int(adj))
+
+#     st.dataframe(sub_adj[[
+#         "maker_brand", "country", "year",
+#         "ice_sales", "ev_sales", "total_sales"
+#     ]])
+
+#     trend = sub_adj.groupby("month")[["ice_sales","ev_sales"]].sum()
+#     st.line_chart(trend)
+
+#     ms = trend.div(trend.sum(axis=1), axis=0).iloc[-1]
+#     st.bar_chart(ms)
+
+#     st.download_button(
+#         "Download adjusted CSV",
+#         sub_adj.to_csv(index=False),
+#         "adjusted.csv"
+#     )
+
+
+
+
+# ============================================================================================================================================================================
+# ============================================================================================================================================================================
+# ============================================================================================================================================================================
+# ============================================================================================================================================================================
+# ============================================================================================================================================================================
+
+
+
+
+
+# File: src/app.py
+# ─── Kaleido headless Chrome bootstrap ───
+try:
+    import kaleido
+    kaleido.get_chrome_sync()
+except Exception:
+    pass
+# ───────────────────────────────────────────
+
+import streamlit as st
+# 1) Set Streamlit’s page configuration BEFORE any other Streamlit calls:
+st.markdown("""
+<style>
+/* Reset font and body */
+html, body, .stApp {
+    font-family: 'Space Grotesk', sans-serif;
+    background-color: #ffffff !important;
+    color: #111111 !important;
+    margin: 0;
+    padding: 0;
+}
+
+/* Remove gray header/banner */
+header, [data-testid="stHeader"] {
+    background-color: transparent !important;
+    box-shadow: none !important;
+    border: none !important;
+}
+
+/* Main content area */
+.block-container {
+    padding: 1rem 2rem 2rem 2rem;
+    background-color: #ffffff !important;
+    color: #111111 !important;
+}
+
+/* Title styling */
+h1 {
+    font-size: 2.2rem;
+    font-weight: 700;
+    color: #111111 !important;
+    margin-bottom: 0.5rem;
+    border-bottom: 2px solid #dddddd;
+    padding-bottom: 0.5rem;
+}
+
+/* Sidebar container */
+[data-testid="stSidebar"] {
+    background-color: #2f2f2f !important;
+    color: #ffffff !important;
+    border-right: 1px solid #444 !important;
+    padding: 1.5rem 1rem 1rem 1rem;
+}
+
+/* Sidebar labels and inputs */
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] .css-1cpxqw2 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: #ffffff !important;
+}
+
+/* Fix dropdown full box color */
+div[data-baseweb="select"] {
+    background-color: #1a1a1a !important;
+    color: #ffffff !important;
+    border: 1px solid #555 !important;
+    border-radius: 6px !important;
+    padding: 0 !important;
+}
+div[data-baseweb="select"] * {
+    background-color: #1a1a1a !important;
+    color: #ffffff !important;
+    border-color: transparent !important;
+}
+
+/* Dropdown options list */
+ul[role="listbox"] {
+    background-color: #2f2f2f !important;
+    color: #ffffff !important;
+    border: 1px solid #555 !important;
+}
+ul[role="listbox"] > li:hover,
+ul[role="listbox"] > li[aria-selected="true"] {
+    background-color: #444 !important;
+    color: #ffffff !important;
+}
+
+/* Sidebar toggle arrow button – adjust color based on state */
+button[kind="icon"] {
+    color: #ffffff !important;
+}
+.stSidebarCollapsed button[kind="icon"] {
+    color: #111111 !important;
+}
+
+/* Hide Streamlit's default footer */
+footer {
+    visibility: hidden;
+}
+            
+/* Optional: Adjust multiselect to look like dropdown */
+div[data-baseweb="select"] {
+    background-color: #1a1a1a !important;
+    color: #ffffff !important;
+    border: 1px solid #555 !important;
+    border-radius: 6px !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+
+
+# ============================================================================================================================================================================
+# ============================================================================================================================================================================
+# ============================================================================================================================================================================
+# ============================================================================================================================================================================
+# ============================================================================================================================================================================
+
+
+
+
+# ——— Kaleido headless Chrome bootstrap ———
+try:
+    import kaleido
+    kaleido.get_chrome_sync()
+except Exception:
+    pass
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import re
+from pathlib import Path
+import plotly.express as px
+import io
+import plotly.graph_objects as go
+
+# ——— Simplified Powertrain Mapper ———
+def simplify_powertrain(p):
+    p = p.strip().upper()
+    if p in {"EV"}:
+        return "BEV"
+    elif p in {
+        "ICE", "HV", "HV/EV", "MILD HV", "HV/EV/PHV", "HV/PHV",
+        "48V MILD HV", "HV/MHV", "MHV", "ICE/EV", "MHV/PHV"
+    }:
+        return "ICE"
+    elif p in {"FCV", "EV/FCV/PHV"}:
+        return "FCEV"
+    elif p in {"PHV", "EV/PHV"}:
+        return "PHEV"
+    return p
+
+
+
+# ——— Multiselect with All Option ———
+def multiselect_with_all(label, options, key_prefix="", default_all=False, expanded=False):
+    with st.sidebar.expander(label, expanded=expanded):
+        option_keys = [f"{key_prefix}_{opt}" for opt in options]
+        all_key = f"{key_prefix}_all"
+
+        if all(k not in st.session_state for k in option_keys):
+            for k in option_keys:
+                st.session_state[k] = default_all
+
+        all_checked = st.checkbox("All", value=default_all, key=all_key)
+
+        if all_checked and not all(st.session_state[k] for k in option_keys):
+            for k in option_keys:
+                st.session_state[k] = True
+        elif not all_checked and all(st.session_state[k] for k in option_keys):
+            for k in option_keys:
+                st.session_state[k] = False
+
+        selections = []
+        for opt, k in zip(options, option_keys):
+            if st.checkbox(opt, value=st.session_state[k], key=k):
+                selections.append(opt)
+
+        if all_checked and len(selections) < len(options):
+            st.session_state[all_key] = False
+        if not all_checked and len(selections) == len(options):
+            st.session_state[all_key] = True
+
+    return selections
+
+
+
+@st.cache_data
+def load_and_prepare():
+    RAW_DIR = Path(__file__).parent.parent / "data" / "raw"
+    all_dfs = []
+    for file in RAW_DIR.glob("*.xlsx"):
+        sheets = pd.read_excel(file, sheet_name=None, header=1)
+        for _, df in sheets.items():
+            df.columns = (
+                df.columns.astype(str)
+                          .str.strip()
+                          .str.lower()
+                          .str.replace(" ", "_")
+                          .str.replace("/", "_")
+            )
+            df["powertrain"] = df.get("powertrain", "").astype(str)
+            all_dfs.append(df)
+
+    combined = pd.concat(all_dfs, ignore_index=True)
+
+
+
+# Fill numeric columns only
+    for col in combined.select_dtypes(include=["number"]).columns:
+        combined[col] = combined[col].fillna(0)
+    date_cols = [c for c in combined.columns if re.match(r"^\d{6}$", c)]
+    id_cols = [c for c in combined.columns if c not in date_cols]
+
+    long = combined.melt(
+        id_vars=id_cols,
+        value_vars=date_cols,
+        var_name="yyyymm",
+        value_name="total_sales"
+    )
+
+    long["total_sales"] = (
+        long["total_sales"].astype(str)
+                           .str.strip()
+                           .replace(r"^-+$", "0", regex=True)
+                           .str.replace(r"[^\d\.-]", "", regex=True)
+                           .replace("", "0")
+                           .astype(float)
+    )
+
+    long["year"] = long["yyyymm"].str[:4].astype(int)
+    long["month"] = long["yyyymm"].str[4:].astype(int)
+
+    for col in ["group", "maker_brand", "country"]:
+        if col in long:
+            long[col] = long[col].astype(str)
+
+
+
+    # ——— Powertrain Simplification ———
+    long["powertrain_simplified"] = long["powertrain"].apply(simplify_powertrain)
+
+
+
+    # ——— OEM Mapping ———
+    oem_clean_map = {
+        "Anhui Jianghuai Automotive Group": "Anhui Jianghuai Automotive Group",
+        "Ashok Leyland Group (2022-)": "Ashok Leyland Group (2022-)",
+        "Aston Martin": "Aston Martin",
+        "AvtoVAZ": "AvtoVAZ",
+        "BAIC Group": "BAIC Group",
+        "BMW Group": "BMW Group",
+        "Brilliance Automobile Group": "Brilliance Automobile Group",
+        "BYD Auto": "BYD Auto",
+        "Changan/Chana (Changan Automobile (Group))": "Changan/Chana (Changan Automobile (Group))",
+        "Chery Automobile": "Chery Automobile",
+        "China National Heavy Duty Truck Group": "China National Heavy Duty Truck Group",
+        "CNH Industrial": "CNH Industrial",
+        "Daewoo Bus Corporation": "Daewoo Bus Corporation",
+        "Daimler Truck Group (2022-)": "Daimler ex Mercedes",
+        # (continue the mapping from your Excel here)...
+    }
+
+    long["group_standardized"] = long["group"].map(oem_clean_map).fillna(long["group"])
+
+    return long
+
+
+
+# ——— Region Map ———
+region_map = {
+    "Europe": ["Austria","Belgium","Bulgaria","Croatia","Czech Republic","Denmark","Estonia","Finland",
+                "France","Germany","Greece","Hungary","Ireland","Italy","Luxembourg","Netherlands",
+                "Norway","Poland","Portugal","Romania","Slovakia","Slovenia","Spain","Sweden","Switzerland",
+                "UK"],
+    "North America": ["USA","Canada"],
+    "LATAM": ["Argentina","Brazil","Chile","Colombia","Mexico","Puerto Rico","Uruguay","Venezuela"],
+    "EEMEA": ["Belarus","Egypt","Israel","Kazakhstan","Kuwait","Oman","Pakistan","Russia",
+              "Saudi Arabia","South Africa","Turkey","UAE","United Arab Emirates","Ukraine","Uzbekistan"],
+    "China": ["China"],
+    "Japan & Korea": ["Japan","Korea","South Korea","Republic of Korea"],
+    "India": ["India"],
+    "Southeast Asia": ["Indonesia","Malaysia","Myanmar","Philippines","Singapore","Taiwan","Thailand","Vietnam"],
+    "Oceania": ["Australia","New Zealand"]
+}
+
+country_to_region = {
+    country: region
+    for region, countries in region_map.items()
+    for country in countries
+}
+
+# ——— Load & UI ———
+df = load_and_prepare()
+
+st.markdown("""
+<div class="title-wrapper">
+    <h1>🚗 Auto Research 🚗</h1>
+</div>
+""", unsafe_allow_html=True)
+
+with st.sidebar:
+    # 1. Region Selector
+    selected_regions = multiselect_with_all(
+        "Region", list(region_map.keys()),
+        key_prefix="region", default_all=False, expanded=False
+    )
+
+    # 2. Country Selector
+    if st.session_state.get("region_all", False):
+        eligible_countries = sorted(country_to_region.keys())
+    elif selected_regions:
+        eligible_countries = sorted([
+            country for region in selected_regions for country in region_map[region]
+        ])
+    else:
+        eligible_countries = sorted(country_to_region.keys())
+
+    for c in eligible_countries:
+        k = f"country_{c}"
+        if k not in st.session_state:
+            st.session_state[k] = False
+
+    selected_countries = multiselect_with_all(
+        "Country", eligible_countries,
+        key_prefix="country", default_all=False, expanded=False
+    )
+
+    # 3. OEM Selector (uses full df, not filtered yet)
+    eligible_oems = sorted([
+        g for g in df["group_standardized"].dropna().unique()
+        if str(g).strip() not in {"", "0", "nan", "NaN"}
+    ])
+    selected_oems = multiselect_with_all(
+        "OEM", eligible_oems,
+        key_prefix="oem", default_all=False, expanded=False
+    )
+
+    # 4. Brand Selector (all brands under selected OEMs, or all)
+    df_for_brands = df[df["group_standardized"].isin(selected_oems)] if selected_oems else df
+    eligible_brands = sorted(df_for_brands["maker_brand"].dropna().unique())
+    for b in eligible_brands:
+        k = f"brand_{b}"
+        if k not in st.session_state:
+            st.session_state[k] = False
+
+    selected_brands = multiselect_with_all(
+        "Brand", eligible_brands,
+        key_prefix="brand", default_all=False, expanded=False
+    )
+
+    # 5. Powertrain Selector (cleaned and deduplicated)
+    df_for_powertrains = df_for_brands[df_for_brands["maker_brand"].isin(selected_brands)] if selected_brands else df_for_brands
+    eligible_powertrains = sorted([
+        pt for pt in df_for_powertrains["powertrain_simplified"].dropna().unique()
+        if str(pt).strip().upper() not in {"", "NAN"}
+    ])
+    for pt in eligible_powertrains:
+        key = f"powertrain_{pt}"
+        if key not in st.session_state:
+            st.session_state[key] = False
+
+    selected_powertrains = multiselect_with_all(
+        "Powertrain", eligible_powertrains,
+        key_prefix="powertrain", default_all=False, expanded=False
+    )
+
+    # 6. Year range slider — filters data by full calendar years
+    year_min = int(df["year"].min())
+    year_max = int(df["year"].max())
+    selected_year_range = st.slider(
+        "Year Range",
+        min_value=year_min,
+        max_value=year_max,
+        value=(year_min, year_max),
+        step=1
+    )
+
+    # 7. Data Visualisation
+    chart_types = {
+        "OEM Share vs OEMs (Pie)": "pie_geo",
+        "OEM Share - Internal (Pie)": "pie_internal",
+        "OEM Sales vs OEMs (Bar)": "bar_geo",
+        "OEM Sales by Brand (Bar)": "bar_brand",
+        "Sales Over Time (Line)": "line_sales",
+        "Market Share Over Time (Line)": "line_share",
+        # You can add more as needed
+    }
+
+    selected_chart_type = st.selectbox("📊 Data Visualisation", list(chart_types.keys()))
+    selected_chart_key = chart_types[selected_chart_type]
+
+    # 8. Search button
+    search_triggered = st.sidebar.button("🔍 Search")
+
+    # 9. Reset button
+    reset_triggered = st.sidebar.button("♻️ Reset Filters")
+
+    if reset_triggered:
+        reset_prefixes = ["region_", "country_", "oem_", "brand_", "powertrain_"]
+        reset_exacts  = ["region_all", "country_all", "oem_all", "brand_all", "powertrain_all"]
+
+        for k in list(st.session_state.keys()):
+            if any(k.startswith(p) for p in reset_prefixes) or k in reset_exacts:
+                del st.session_state[k]
+    
+    # Reset year range slider (use same key name as used in st.slider)
+    st.session_state["Year Range"] = (year_min, year_max)
+
+    st.rerun()
+
+# ——— Apply Filters to df_filtered only when search is triggered ———
+df_filtered = pd.DataFrame()  # default to empty
+
+if search_triggered:
+    df_filtered = df.copy()
+
+    if selected_countries:
+        df_filtered = df_filtered[df_filtered["country"].isin(selected_countries)]
+
+    if selected_oems:
+        df_filtered = df_filtered[df_filtered["group_standardized"].isin(selected_oems)]
+
+    if selected_brands:
+        df_filtered = df_filtered[df_filtered["maker_brand"].isin(selected_brands)]
+
+    if selected_powertrains:
+        df_filtered = df_filtered[df_filtered["powertrain_simplified"].isin(selected_powertrains)]
+    
+    # Filter full months within selected year range
+    start_year, end_year = selected_year_range
+    df_filtered = df_filtered[
+        (df_filtered["year"] >= start_year) &
+        (df_filtered["year"] <= end_year)
+    ]
+
+if not df_filtered.empty:
+    st.subheader("📈 Results")
+
+    if selected_chart_key == "pie_geo":
+        fig = px.pie(
+            df_filtered,
+            names="group_standardized",
+            values="total_sales",
+            title="OEM Market Share by Country/Region"
+        )
+        fig.update_layout(
+            title_font=dict(size=18, family="Space Grotesk", color="black"),
+            legend_title="OEM",
+            margin=dict(l=40, r=30, t=60, b=40),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    elif selected_chart_key == "pie_internal":
+        df_filtered["region"] = df_filtered["country"].map(country_to_region)
+        grouped = df_filtered.groupby(["region", "group_standardized"])["total_sales"].sum().reset_index()
+
+        fig = px.sunburst(
+            grouped,
+            path=["region", "group_standardized"],
+            values="total_sales",
+            title="OEM Share by Region"
+        )
+        fig.update_layout(
+            title_font=dict(size=18, family="Space Grotesk", color="black"),
+            margin=dict(l=40, r=30, t=60, b=40),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    elif selected_chart_key == "bar_geo":
+        df_filtered["region"] = df_filtered["country"].map(country_to_region)
+        grouped = df_filtered.groupby(["region", "group_standardized"])["total_sales"].sum().reset_index()
+
+        fig = px.bar(
+            grouped,
+            x="region",
+            y="total_sales",
+            color="group_standardized",
+            title="OEM Global Sales by Region",
+            barmode="group"
+        )
+        fig.update_layout(
+            xaxis_title="Region",
+            yaxis_title="Total Sales",
+            title_font=dict(size=18, family="Space Grotesk", color="black"),
+            legend_title="OEM",
+            margin=dict(l=40, r=30, t=60, b=40),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+
+    elif selected_chart_key == "bar_brand":
+        grouped = df_filtered.groupby(["group_standardized", "maker_brand"])["total_sales"].sum().reset_index()
+
+        fig = px.bar(
+            grouped,
+            x="maker_brand",
+            y="total_sales",
+            color="group_standardized",
+            title="Sales by Brand within OEM"
+        )
+        fig.update_layout(
+            xaxis_title="Brand",
+            yaxis_title="Total Sales",
+            title_font=dict(size=18, family="Space Grotesk", color="black"),
+            legend_title="OEM",
+            xaxis_tickangle=45,
+            margin=dict(l=40, r=30, t=60, b=80),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    elif selected_chart_key == "line_sales":
+        df_filtered["year_month"] = pd.to_datetime(df_filtered["year"].astype(str) + "-" + df_filtered["month"].astype(str))
+        monthly = df_filtered.groupby("year_month")["total_sales"].sum().reset_index()
+
+        fig = px.line(
+            monthly,
+            x="year_month",
+            y="total_sales",
+            title="Total Sales Over Time"
+        )
+        fig.update_layout(
+            xaxis_title="Time (Month)",
+            yaxis_title="Total Sales",
+            title_font=dict(size=18, family="Space Grotesk", color="black"),
+            margin=dict(l=40, r=30, t=60, b=40),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    elif selected_chart_key == "line_share":
+        df_filtered["year_month"] = pd.to_datetime(df_filtered["year"].astype(str) + "-" + df_filtered["month"].astype(str))
+        total = df_filtered.groupby(["year_month"])["total_sales"].sum().rename("total_market")
+        df_filtered = df_filtered.join(total, on="year_month")
+        df_filtered["market_share"] = df_filtered["total_sales"] / df_filtered["total_market"]
+
+        share = df_filtered.groupby(["year_month", "group_standardized"])["market_share"].mean().reset_index()
+
+        fig = px.line(
+            share,
+            x="year_month",
+            y="market_share",
+            color="group_standardized",
+            title="OEM Market Share Over Time"
+        )
+        fig.update_layout(
+            xaxis_title="Time (Month)",
+            yaxis_title="Market Share",
+            title_font=dict(size=18, family="Space Grotesk", color="black"),
+            legend_title="OEM",
+            margin=dict(l=40, r=30, t=60, b=40),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ... You can add more chart keys and visuals as needed
+    
+else:
+    if search_triggered:
+        st.warning("No data available for selected filters.")
