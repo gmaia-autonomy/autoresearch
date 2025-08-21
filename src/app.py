@@ -1,5 +1,8 @@
 
 # This is attempt 1 of incorporating the moving averages option into the code - 20/08/2025
+# This has work. 
+
+# ===================================== THIS IS THE FINAL VERSION =====================================
 
 import os
 

@@ -1,17 +1,23 @@
 
 # This is attempt 1 of incorporating the moving averages option into the code - 20/08/2025
+# This has work. 
 
+# ===================================== THIS IS THE FINAL VERSION =====================================
+
+import os
 
 # ─── Kaleido headless Chrome bootstrap ───
-try:
-    import kaleido
-    kaleido.get_chrome_sync()
-except Exception:
-    pass
-# ───────────────────────────────────────────
+if os.environ.get("ENABLE_KALEIDO_BOOTSTRAP") == "1":
+    try:
+        import kaleido
+        kaleido.get_chrome_sync()
+    except Exception:
+        pass
+# ─────────────────────────────────────────
 
 import streamlit as st
 st.set_page_config(layout="wide")  # must be the first Streamlit call
+st.set_option("client.showErrorDetails", True)
 
 # 1) Set Streamlit’s page configuration BEFORE any other Streamlit calls:
 st.markdown("""
@@ -101,7 +107,6 @@ from pathlib import Path
 import plotly.express as px
 import io
 import plotly.graph_objects as go
-import os
 
 
 
@@ -686,8 +691,6 @@ oem_group_map = {
 
 # =============================================== Load and Prepare Data ======================================================================================================
 
-
-
 from pathlib import Path  # (you already import this above; ok to keep)
 
 CACHE = Path(__file__).resolve().parent.parent / ".cache" / "long.parquet"
@@ -723,9 +726,15 @@ try:
                 "`python tools/build_cache.py`"
             )
     else:
-        # Fallback if cache missing
-        df = load_and_prepare(DATA_VERSION).copy()
-        st.success(f"Loaded {len(df):,} rows (no cache found).")
+        # Cache missing: stop with a clear instruction instead of rebuilding from Excel
+        st.error("Cache file missing: `.cache/long.parquet`")
+        st.info(
+            "Build it locally with:\n\n"
+            "`python tools/build_cache.py`\n\n"
+            "Then commit/upload the entire `.cache` folder (including "
+            "`long.parquet` and `.manifest.json`)."
+        )
+        st.stop()
 
 except Exception as e:
     st.error(f"❌ Failed to load data: {e}")
@@ -733,26 +742,48 @@ except Exception as e:
     st.stop()
 
 
+# --- Brand Map ---
 
-# ——— Brand Map ———
+# Ensure required columns are present
+required_cols = {"yyyymm", "total_sales", "country"}
+missing = required_cols - set(df.columns)
+if missing:
+    st.set_option("client.showErrorDetails", True)
+    st.error(f"Data is missing required column(s): {sorted(missing)}")
+    st.stop()
 
+# Create optional columns if absent
+for col in ["maker_brand", "group", "powertrain_simplified"]:
+    if col not in df.columns:
+        df[col] = ""
 
+# Normalize maker_brand
+df["maker_brand"] = df["maker_brand"].astype(str).str.strip().str.upper()
 
+# Flatten OEM group map
+flat_oem_map = {
+    raw: clean
+    for clean, raw_list in oem_group_map.items()
+    for raw in raw_list
+}
 
-df["maker_brand"] = df["maker_brand"].str.strip().str.upper()
-df["group_standardized"] = df["group"].map({
-    oem_raw: oem_clean
-    for oem_clean, raw_list in oem_group_map.items()
-    for oem_raw in raw_list
-}).fillna(df["group"]).str.strip()
-
-brand_to_oem = (
-    df[["maker_brand", "group_standardized"]]
-    .dropna()
-    .drop_duplicates()
-    .set_index("maker_brand")["group_standardized"]
-    .to_dict()
+# Apply OEM standardization safely
+df["group_standardized"] = (
+    df["group"].astype(str).map(flat_oem_map).fillna(df["group"]).astype(str).str.strip()
 )
+
+# Build brand→OEM mapping if possible
+brand_to_oem = {}
+if {"maker_brand", "group_standardized"}.issubset(df.columns):
+    brand_to_oem = (
+        df[["maker_brand", "group_standardized"]]
+        .dropna()
+        .drop_duplicates()
+        .set_index("maker_brand")["group_standardized"]
+        .to_dict()
+    )
+else:
+    brand_to_oem = {}
 
 
 # ——— Powertrain Map ———
