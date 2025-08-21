@@ -700,7 +700,7 @@ MANIFEST = CACHE.with_suffix(".manifest.json")
 def _current_files_snapshot():
     files = sorted(RAW_DIR.glob("*.xlsx"), key=lambda p: p.name)
     return [
-        {"name": f.name, "size": f.stat().st_size, "mtime": int(f.stat().st_mtime)}
+        {"name": f.name, "size": f.stat().st_size}
         for f in files
     ]
 
