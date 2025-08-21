@@ -1,6 +1,7 @@
 
 # This is attempt 1 of incorporating the moving averages option into the code - 20/08/2025
 
+import os
 
 # ─── Kaleido headless Chrome bootstrap ───
 if os.environ.get("ENABLE_KALEIDO_BOOTSTRAP") == "1":
@@ -103,7 +104,6 @@ from pathlib import Path
 import plotly.express as px
 import io
 import plotly.graph_objects as go
-import os
 
 
 
