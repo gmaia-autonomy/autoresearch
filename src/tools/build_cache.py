@@ -5,7 +5,7 @@ import numpy as np
 import json
 
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
+DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "raw"
 CACHE    = Path(__file__).resolve().parents[1] / ".cache" / "long.parquet"
 RAW_DIR  = DATA_DIR
 MANIFEST = CACHE.with_suffix(".manifest.json")
