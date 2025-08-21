@@ -704,14 +704,27 @@ def _current_files_snapshot():
         for f in files
     ]
 
+def _files_name_size(items):
+    # Normalize to (name, size) tuples, ignore extra keys, coerce size to int
+    pairs = []
+    for f in items:
+        name = f.get("name")
+        size = f.get("size")
+        if name is not None and size is not None:
+            pairs.append((name, int(size)))
+    return sorted(pairs, key=lambda t: t[0])
+
 def _manifest_matches_current():
     try:
         if not MANIFEST.exists():
             return True  # don’t warn on first run before manifest exists
         m = json.loads(MANIFEST.read_text())
-        return m.get("files", []) == _current_files_snapshot()
+        manifest_pairs = _files_name_size(m.get("files", []))
+        current_pairs  = _files_name_size(_current_files_snapshot())
+        return manifest_pairs == current_pairs
     except Exception:
         return False
+        
 
 try:
     if CACHE.exists():
