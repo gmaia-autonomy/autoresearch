@@ -1,6 +1,6 @@
 
-# This is attempt 2 of incorporating the moving averages option into the code - 22/08/2025
-# This has worked, but errors frequently due to it being a large script/dataset to run. 
+# This is attempt 3 of incorporating the moving averages option into the code - 26/08/2025
+# 
 
 # ===================================== THIS IS THE FINAL VERSION =====================================
 
@@ -112,214 +112,8 @@ import math
 
 
 
-# ---------------- Cache version key (bump to invalidate st.cache_data) ----------------
-DATA_VERSION = "pt_na_to_ice_2025-08-19"
 
-
-
-
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-
-
-
-
-
-
-# =========================================== Reset-Aware Wrapper for Multiselect ============================================================================
-
-def safe_multiselect_with_reset(filter_name, choices, default_all=False, expanded=False):
-    """
-    Wrapper for multiselect_with_all with auto-reset if choices have changed
-    to prevent stale selections or crashes.
-    """
-    all_key = f"{filter_name}_All"
-    existing_keys = [k for k in st.session_state if k.startswith(f"{filter_name}_")]
-    expected_keys = [f"{filter_name}_{c}" for c in choices] + [all_key]
-
-    # Reset only if keys mismatch (choices changed)
-    if set(existing_keys) != set(expected_keys):
-        for k in existing_keys:
-            del st.session_state[k]
-
-    return multiselect_with_all(
-        filter_name,
-        choices=choices,
-        default_all=default_all,
-        expanded=expanded
-    )
-
-
-
-
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-
-
-
-
-# =========================================== Definiton of "All" Function ====================================================================================================
-
-def multiselect_with_all(
-    option: str,
-    choices: list,
-    *,
-    default_all: bool = False,
-    expanded: bool = False
-) -> list:
-    """
-    Checkbox group with a true 'All' master toggle:
-
-      • All ON  -> checks every item immediately
-      • All OFF -> unchecks every item immediately
-
-    Works because we:
-      - initialize session_state BEFORE widget creation
-      - never write to the 'All' key after it's created (outside callbacks)
-      - run outside a form so the page reruns on every click
-    """
-    selections = []
-    all_key   = f"{option}_All"
-    item_keys = [f"{option}_{c}" for c in choices]
-
-    with st.sidebar.expander(option, expanded=expanded):
-        # 1) Ensure keys exist / reset if choice set changed
-        state_item_keys = [k for k in st.session_state if k.startswith(f"{option}_") and k != all_key]
-        needs_reset = (
-            (all_key not in st.session_state) or
-            (len(state_item_keys) != len(choices)) or
-            any(k not in st.session_state for k in item_keys)
-        )
-        if needs_reset:
-            for k in item_keys:
-                st.session_state[k] = bool(default_all)
-            st.session_state[all_key] = bool(default_all)   # set BEFORE widget creation
-
-        # 2) Callback: make 'All' a master switch
-        def _toggle_all():
-            set_to = bool(st.session_state[all_key])
-            for k in item_keys:
-                st.session_state[k] = set_to
-
-        # 3) All widget (no writing to its key after creation)
-        st.checkbox("All", value=st.session_state[all_key], key=all_key, on_change=_toggle_all)
-
-        # 4) Individual items (render from state; clicking them reruns app)
-        for choice, key in zip(choices, item_keys):
-            st.checkbox(choice, value=st.session_state[key], key=key)
-            if st.session_state[key]:
-                selections.append(choice)
-
-    return selections
-
-
-
-
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-
-
-
-
-def plot_consolidated_sales_by_region(df_filtered: pd.DataFrame, region_map: dict, title: str):
-    """
-    Given df_filtered (only rows for a single OEM or a single Brand),
-    build a stacked‐bar “Unit Sales by Region” chart using Plotly.
-    """
-
-    # 1) Build reverse lookup: country → region
-    country_to_region = {}
-    for region_name, countries in region_map.items():
-        for c in countries:
-            country_to_region[c] = region_name
-
-    # 2) Copy DataFrame & map each row’s country → region
-    df = df_filtered.copy()
-    df["region"] = df["country"].map(country_to_region)
-    df = df.dropna(subset=["region"])  # drop any row whose country isn’t in region_map
-
-    # 3) Aggregate total_sales by (yyyymm, region)
-    agg = (
-        df.groupby(["yyyymm", "region"])["total_sales"]
-          .sum()
-          .reset_index(name="region_sales")
-    )
-
-    # 4) Pivot so that each region becomes its own column
-    pivot = agg.pivot(index="yyyymm", columns="region", values="region_sales").fillna(0)
-
-    # 5) Convert “yyyymm” (string like “202301”) → datetime index
-    pivot = pivot.reset_index()
-    pivot["month_year"] = pd.to_datetime(pivot["yyyymm"], format="%Y%m")
-    pivot = pivot.set_index("month_year").drop(columns=["yyyymm"]).sort_index()
-
-    # 6) Trim trailing rows where all regions = 0
-    nonzero_mask = pivot.sum(axis=1) > 0
-    if nonzero_mask.any():
-        last_date = pivot.index[nonzero_mask][-1]
-        pivot = pivot.loc[:last_date]
-
-    # 7) Build a Plotly stacked‐bar figure (light template)
-    # Use fixed colors for regions in the order of columns
-    region_order = pivot.columns.tolist()
-    fallback = px.colors.qualitative.Plotly
-    seq = [REGION_COLORS.get(r, fallback[i % len(fallback)]) for i, r in enumerate(region_order)]
-
-    fig = px.bar(
-        pivot,
-        x=pivot.index,
-        y=region_order,
-        labels={"value": "Unit Sales", "month_year": "Month"},
-        title=title,
-        template="plotly_white",
-        color_discrete_sequence=seq  # ← fixed region colors
-    )
-
-    # 8) Adjust layout: stacked bars, rotate x‐labels, format y‐axis, legend on top
-    fig.update_layout(
-        barmode="stack",
-        xaxis=dict(
-            tickformat="%m/%Y",   # e.g. “01/2024”
-            tickangle=-45,
-            title_text=""
-        ),
-        yaxis=dict(
-            title_text="Unit Sales",
-            tickformat=","      # e.g. “1,234,567”
-        ),
-        legend=dict(
-            title_text="",
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        ),
-        margin=dict(l=60, r=40, t=60, b=100)
-    )
-
-    # 9) Add numeric labels INSIDE each bar segment
-    for region_name in pivot.columns:
-        idx = [trace.name for trace in fig.data].index(region_name)
-        fig.data[idx].update(
-            texttemplate="%{y:,.0f}",
-            textposition="outside",  # better for light background
-            textfont_color="black"   # optional: ensure legibility
-        )
-
-    return fig
     
-
-
 # ============================================================================================================================================================================
 # ============================================================================================================================================================================
 # ============================================================================================================================================================================
@@ -329,35 +123,77 @@ def plot_consolidated_sales_by_region(df_filtered: pd.DataFrame, region_map: dic
 
 
 
-def simplify_powertrain(p):
-    """Normalize powertrain into BEV, ICE, PHEV, FCEV. Treat missing/placeholder as ICE."""
-    import pandas as pd
 
-    # 1) Real missings (NaN, None, <NA>)
-    if p is None or pd.isna(p):
-        return "ICE"
+def multiselect_with_all_dropdown(
+    label: str,
+    options: list[str],
+    *,
+    key_prefix: str,
+    default_all: bool = False,
+    expanded: bool = False,
+    help: str | None = None,
+):
+    import hashlib
 
-    # 2) Normalize string
-    s = str(p).strip().upper()
+    def _opt_sig(vals: list[str]) -> str:
+        s = "|".join(map(str, vals))
+        return hashlib.md5(s.encode("utf-8")).hexdigest()
 
-    # 3) Placeholders that should be ICE
-    PLACEHOLDERS = {"", "-", "—", "N/A", "NA", "N.A.", "N ⁄ A", "N / A", "NAN"}  # NAN covers str(np.nan)
-    if s in PLACEHOLDERS:
-        return "ICE"
+    opt_sig = _opt_sig(options)
+    sig_key = f"{key_prefix}__opt_sig"
+    sel_key = f"{key_prefix}_sel"
+    all_key = f"{key_prefix}_all"
 
-    # 4) Canonical mappings
-    if s == "EV":
-        return "BEV"
-    if s in {
-        "ICE","HV","HV/EV","MILD HV","HV/EV/PHV","HV/PHV","48V MILD HV",
-        "HV/MHV","MHV","ICE/EV","MHV/PHV"
-    }:
-        return "ICE"
-    if s in {"FCV","EV/FCV/PHV"}:
-        return "FCEV"
-    if s in {"PHV","EV/PHV"}:
-        return "PHEV"
-    return s
+    # First-time / options-changed initialization
+    if st.session_state.get(sig_key) != opt_sig:
+        st.session_state[sig_key] = opt_sig
+        if default_all:
+            st.session_state[sel_key] = list(options)
+            st.session_state[all_key] = True
+        else:
+            st.session_state[sel_key] = []
+            st.session_state[all_key] = False
+
+    # Callback: toggle all on/off (checkbox -> multiselect)
+    def _toggle_all():
+        if st.session_state.get(all_key, False):
+            st.session_state[sel_key] = list(options)
+        else:
+            st.session_state[sel_key] = [] 
+
+    # Callback: keep 'All' in sync with multiselect contents (multiselect -> checkbox)
+    def _sync_all_from_sel():
+        sel = st.session_state.get(sel_key, [])
+        st.session_state[all_key] = (len(sel) == len(options) and len(options) > 0)
+
+    with st.sidebar.expander(label, expanded=expanded):
+        # 1) 'All' master checkbox
+        st.checkbox("All", key=all_key, on_change=_toggle_all)
+
+        # 2) Multiselect (searchable)
+        selected = st.multiselect(
+            label=" ", options=options,
+            default=st.session_state.get(sel_key, []),
+            key=sel_key, help=help,
+            label_visibility="collapsed",
+            on_change=_sync_all_from_sel,  # <<< added
+        )
+
+        # 3) (REMOVED) DO NOT set st.session_state[all_key] here
+
+        # 4) Optional "Browse all"
+        with st.expander("Browse all"):
+            q = st.text_input(f"Filter {label} (optional)", key=f"{key_prefix}__browse_q", placeholder="Type to filter…")
+            if q:
+                browse = [o for o in options if q.lower() in o.lower()]
+            else:
+                browse = options
+            st.caption(f"Showing {len(browse):,} of {len(options):,}")
+            if browse:
+                st.markdown("  \n".join(f"• {o}" for o in browse))
+
+    return selected
+
 
     
 
@@ -453,104 +289,6 @@ def make_title(
     tail = " | ".join([b for b in tail_bits if b])
     return f"{head} | {tail}" if tail else head
 
-
-
-
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-# ============================================================================================================================================================================
-
-
-
-@st.cache_data
-def load_and_prepare(_cache_buster: str = DATA_VERSION):
-    """
-    Load and clean raw Excel data, pivot monthly columns into a long DataFrame,
-    and return with proper numeric types and extracted year/month.
-    """
-    # --- EXACT REPLACEMENT STARTS HERE ---
-    RAW_DIR = (Path(__file__).resolve().parent.parent / "data" / "raw")
-    files = list(RAW_DIR.glob("*.xlsx"))
-    if not files:
-        raise FileNotFoundError(f"No Excel files found in {RAW_DIR}")
-
-    all_dfs = []
-    for file in files:
-        # Read loudly so errors surface in the UI instead of killing the process
-        try:
-            sheets = pd.read_excel(file, sheet_name=None, header=1, engine="openpyxl")
-        except Exception as e:
-            raise RuntimeError(f"Error reading {file.name}: {e}")
-
-        for sheet_name, df in sheets.items():
-            # Skip empty sheets early
-            if df is None or df.empty:
-                continue
-            # Normalize headers
-            df.columns = (
-                df.columns
-                  .astype(str)
-                  .str.strip()
-                  .str.lower()
-                  .str.replace(" ", "_")
-                  .str.replace("/", "_")
-            )
-            # Keep only columns we actually use; skip sheets with no YYYYMM cols
-            date_cols = [c for c in df.columns if re.match(r"^\d{6}$", c)]
-            base_cols = [c for c in ["group", "maker_brand", "country", "powertrain"] if c in df.columns]
-            if not date_cols:
-                # No monthly columns → ignore this sheet
-                continue
-            df = df[base_cols + date_cols].copy()
-
-            if "powertrain" in df.columns:
-                df["powertrain_simplified"] = df["powertrain"].apply(simplify_powertrain)
-            else:
-                df["powertrain_simplified"] = np.nan
-
-            all_dfs.append(df)
-    # --- EXACT REPLACEMENT ENDS HERE ---
-
-    # Combine all sheets
-    combined = pd.concat(all_dfs, ignore_index=True)
-
-    # Identify date columns YYYYMM
-    date_cols = [c for c in combined.columns if re.match(r"^\d{6}$", c)]
-    id_cols   = [c for c in combined.columns if c not in date_cols]
-
-    # Melt wide to long
-    long = combined.melt(
-        id_vars=id_cols,
-        value_vars=date_cols,
-        var_name="yyyymm",
-        value_name="total_sales"
-    )
-
-    # Clean and convert sales to float
-    long["total_sales"] = (
-        long["total_sales"]
-          .astype(str)
-          .str.strip()
-          .replace(r"^-+$", "0", regex=True)
-          .str.replace(r"[^\d\.-]", "", regex=True)
-          .replace("", "0")
-          .astype(float)
-    )
-
-    # Extract year, month + build monthly datetime and label
-    long["year"]       = long["yyyymm"].astype(str).str[:4].astype(int)
-    long["month"]      = long["yyyymm"].astype(str).str[4:].astype(int)
-    long["month_dt"]   = pd.to_datetime(long["yyyymm"].astype(str), format="%Y%m")  # for sorting
-    long["month_label"] = long["month_dt"].dt.strftime("%m/%Y")                    # for display
-
-    # Ensure key categoricals are strings
-    for col in ["group", "maker_brand", "country"]:
-        if col in long:
-            long[col] = long[col].astype(str)
-
-    return long
 
 
 
@@ -693,11 +431,15 @@ oem_group_map = {
 
 # =============================================== Load and Prepare Data ======================================================================================================
 
-from pathlib import Path  # (you already import this above; ok to keep)
 
-CACHE = Path(__file__).resolve().parent.parent / ".cache" / "long.parquet"
-RAW_DIR  = Path(__file__).resolve().parent.parent / "data" / "raw"
-MANIFEST = CACHE.with_suffix(".manifest.json")
+from pathlib import Path
+
+_APP_FILE = globals().get("__file__", None)
+_APP_ROOT = Path(_APP_FILE).resolve().parent.parent if _APP_FILE else Path.cwd()
+
+CACHE    = _APP_ROOT / ".cache" / "long.parquet"
+RAW_DIR  = _APP_ROOT / "data" / "raw"
+MANIFEST = (_APP_ROOT / ".cache" / "long.parquet").with_suffix(".manifest.json")
 
 def _current_files_snapshot():
     files = sorted(RAW_DIR.glob("*.xlsx"), key=lambda p: p.name)
@@ -728,10 +470,27 @@ def _manifest_matches_current():
         return False
         
 
+@st.cache_data(show_spinner=False)
+def _read_cache(p: Path) -> pd.DataFrame:
+    return pd.read_parquet(p)
+
 try:
     if CACHE.exists():
-        df = pd.read_parquet(CACHE)
+        df = _read_cache(CACHE)
         st.success(f"Loaded cached data: {len(df):,} rows from {CACHE.name}")
+
+        # --- Derive calendar columns from yyyymm (if missing) ---
+        if "year" not in df.columns or "month" not in df.columns:
+            _ym = df["yyyymm"].astype(str).str.extract(r"^(?P<Y>\d{4})(?P<M>\d{2})$").astype(int)
+            df["year"] = _ym["Y"]
+            df["month"] = _ym["M"]
+
+        # Useful datetime column for global sorts/labels
+        if "month_dt" not in df.columns:
+            df["month_dt"] = pd.to_datetime(
+                df["year"].astype(str) + df["month"].astype(str).str.zfill(2),
+                format="%Y%m"
+            )
 
         # Warn if cache is stale vs data/raw
         if not _manifest_matches_current():
@@ -787,6 +546,11 @@ df["group_standardized"] = (
     df["group"].astype(str).map(flat_oem_map).fillna(df["group"]).astype(str).str.strip()
 )
 
+# Speed/size: categorical dtypes for big string columns
+for col in ["country", "group_standardized", "maker_brand", "powertrain_simplified"]:
+    if col in df.columns:
+        df[col] = df[col].astype("category")
+
 # Build brand→OEM mapping if possible
 brand_to_oem = {}
 if {"maker_brand", "group_standardized"}.issubset(df.columns):
@@ -827,7 +591,7 @@ st.markdown("""
 
 
 # Debug: show where data is being loaded from
-st.caption(f"Data path: {(Path(__file__).resolve().parent.parent / 'data' / 'raw')}")
+st.caption(f"Data path: {RAW_DIR}")
 
 
 # ============================================================================================================================================================================
@@ -852,13 +616,21 @@ def expand_countries_for_filter(selected_countries, country_expansion_map):
             expanded.append(c)
     return sorted(set(expanded))
 
+# One-time cleanup of legacy checkbox state keys (from older UI)
+for k in list(st.session_state.keys()):
+    if k.startswith(("Region_", "Country_", "OEM_", "Brand_", "Powertrain_")) and not k.endswith(("_sel","_all","__browse_q","__opt_sig")):
+        st.session_state.pop(k, None)
+
 # ── BEGIN: Sidebar Form ─────────────────────────────────────────────────────────
 do_search = st.sidebar.button("Search", use_container_width=True)
 
 # Region
 region_choices = list(region_map.keys())
-selected_regions = multiselect_with_all("Region", choices=region_choices, default_all=False, expanded=False)
-region_all_selected = st.session_state.get("Region_All", False)
+selected_regions = multiselect_with_all_dropdown(
+    "Region", region_choices,
+    key_prefix="Region", default_all=False, expanded=False
+)
+region_all_selected = st.session_state.get("Region_all", False)
 
 # Country
 all_countries = sorted(set(c for clist in region_map.values() for c in clist))
@@ -867,16 +639,9 @@ country_choices = (
     if selected_regions else all_countries
 )
 
-# Reset stale country keys if options changed
-existing_country_keys = [k for k in st.session_state if k.startswith("Country_")]
-expected_country_keys = [f"Country_{c}" for c in country_choices] + ["Country_All"]
-if set(existing_country_keys) != set(expected_country_keys):
-    for k in existing_country_keys:
-        del st.session_state[k]
-
-selected_countries = safe_multiselect_with_reset(
-    "Country",
-    choices=country_choices,
+selected_countries = multiselect_with_all_dropdown(
+    "Country", country_choices,
+    key_prefix="Country",
     default_all=region_all_selected,   # only “All” if Region All is on
     expanded=False
 )
@@ -896,7 +661,10 @@ available_oems = sorted(
     oem for oem in filtered_df["group_standardized"].dropna().unique()
     if str(oem).strip().upper() not in {"", "0", "NAN"}
 )
-selected_oems = safe_multiselect_with_reset("OEM", choices=available_oems, default_all=False, expanded=False)
+selected_oems = multiselect_with_all_dropdown(
+    "OEM", available_oems,
+    key_prefix="OEM", default_all=False, expanded=False
+)
 
 # Brand
 brand_filtered_df = filtered_df.copy()
@@ -907,7 +675,10 @@ available_brands = sorted(
     b for b in brand_filtered_df["maker_brand"].dropna().unique()
     if str(b).strip().upper() not in {"", "0", "NAN"}
 )
-selected_brands = safe_multiselect_with_reset("Brand", choices=available_brands, default_all=False, expanded=False)
+selected_brands = multiselect_with_all_dropdown(
+    "Brand", available_brands,
+    key_prefix="Brand", default_all=False, expanded=False
+)
 
 if selected_brands and not selected_oems:
     inferred_oems = sorted({brand_to_oem[b] for b in selected_brands if b in brand_to_oem})
@@ -922,67 +693,33 @@ available_powertrains = sorted(
     pt for pt in powertrain_filtered_df["powertrain_simplified"].dropna().unique()
     if str(pt).strip().upper() not in {"", "0", "NAN"}
 )
-selected_powertrains = safe_multiselect_with_reset("Powertrain", choices=available_powertrains, default_all=False, expanded=False)
+selected_powertrains = multiselect_with_all_dropdown(
+    "Powertrain", available_powertrains,
+    key_prefix="Powertrain", default_all=False, expanded=False
+)
 
 # ── Month Range (monthly everywhere) ─────────────────────────────────────────────
-# Start from the already filtered frame used for Brand/Powertrain lists:
-month_filtered_df = df.copy()
-if selected_countries:
-    _countries_for_filter = expand_countries_for_filter(selected_countries, country_expansion_map)
-    month_filtered_df = month_filtered_df[month_filtered_df["country"].isin(_countries_for_filter)]
-if selected_oems:
-    month_filtered_df = month_filtered_df[month_filtered_df["group_standardized"].isin(selected_oems)]
-if selected_brands:
-    month_filtered_df = month_filtered_df[month_filtered_df["maker_brand"].isin(selected_brands)]
-if selected_powertrains:
-    month_filtered_df = month_filtered_df[month_filtered_df["powertrain_simplified"].isin(selected_powertrains)]
+@st.cache_data(show_spinner=False)
+def months_with_data(_df: pd.DataFrame) -> list[str]:
+    t = _df.assign(yyyymm_str=_df["yyyymm"].astype(str)) \
+           .groupby("yyyymm_str", as_index=False)["total_sales"].sum()
+    return t.loc[t["total_sales"] > 0, "yyyymm_str"].tolist()
 
-# Only include months that actually have data (>0) under current filters
-_month_totals = (
-    month_filtered_df
-        .assign(yyyymm_str=month_filtered_df["yyyymm"].astype(str))
-        .groupby("yyyymm_str", as_index=False)["total_sales"]
-        .sum()
-)
-_available_months = _month_totals.loc[_month_totals["total_sales"] > 0, "yyyymm_str"].tolist()
+month_options = sorted(set(months_with_data(df)), key=int)
 
-# Fallback: if nothing after current filters, use global months that have data
-if not _available_months:
-    _month_totals_global = (
-        df.assign(yyyymm_str=df["yyyymm"].astype(str))
-          .groupby("yyyymm_str", as_index=False)["total_sales"].sum()
-    )
-    _available_months = _month_totals_global.loc[_month_totals_global["total_sales"] > 0, "yyyymm_str"].tolist()
-
-# Sort by numeric YYYYMM to ensure true chronology
-month_options = sorted(set(_available_months), key=int)
-
-# Default to EARLIEST → LATEST (true first & last available months)
-if month_options:
-    start_default = month_options[0]
-    end_default   = month_options[-1]
-else:
-    start_default, end_default = "200001", "200001"
-
-# If still no months, stop gracefully (prevents Streamlit API error)
 if not month_options:
     st.warning("⚠️ No months with data were found. Add valid Excel files to data/raw or adjust filters.")
     st.stop()
+
+start_default = month_options[0]
+end_default   = month_options[-1]
 
 selected_month_range = st.sidebar.select_slider(
     "Month Range (MM/YYYY)",
     options=month_options,
     value=(start_default, end_default),
-    format_func=yyyymm_to_label,   # ← show as MM/YYYY
+    format_func=yyyymm_to_label,   # show as MM/YYYY
 )
-
-# Build final_df strictly by month range
-start_yyyymm, end_yyyymm = selected_month_range
-final_df = month_filtered_df[
-    (month_filtered_df["yyyymm"].astype(str) >= start_yyyymm) &
-    (month_filtered_df["yyyymm"].astype(str) <= end_yyyymm)
-].copy()
-final_df = final_df.sort_values("month_dt")  # ensures chronological order globally
 
 # Data Visualisation (monthly only)
 viz_choices = ["Sales — Internal", "Sales — Competitive", "Share — Internal", "Share — Competitive"]
@@ -1002,6 +739,21 @@ selected_ma_window = MA_CHOICES[selected_ma_label]
 st.session_state["viz_time_grain"] = "monthly"
 st.session_state["viz_is_internal"] = "Internal" in selected_viz
 st.session_state["viz_is_sales"] = selected_viz.startswith("Sales")
+
+# ---- Invalidate results when any filter changes ----
+current_sig = (
+    tuple(sorted(selected_regions)),
+    tuple(sorted(selected_countries)),
+    tuple(sorted(selected_oems)),
+    tuple(sorted(selected_brands)),
+    tuple(sorted(selected_powertrains)),
+    tuple(selected_month_range),
+    selected_viz,
+    selected_ma_label,
+)
+if st.session_state.get("_current_sig") != current_sig:
+    st.session_state["_current_sig"] = current_sig
+    st.session_state["filters_searched"] = False
 
 
 # ── END: Sidebar Form ───────────────────────────────────────────────────────────
@@ -1238,24 +990,31 @@ def _redistribute_period_totals_monthly(
     """
     Normalize mixed cadences (annual/half/quarter) to monthly.
     If max_yyyymm is provided, we will NOT generate or keep months beyond it.
+    Always returns a frame where group_cols + ['year','month', value_col] are real columns.
     """
     if df.empty:
-        return df.copy()
+        # ensure expected columns exist
+        cols = list(group_cols) + ["year", "month", value_col]
+        return pd.DataFrame(columns=cols)
+
+    # Build a full (group, year, month) grid, left-join existing values
     all_keys = (df[group_cols + ["year"]].drop_duplicates().assign(_d=1))
-    months = pd.DataFrame({"month": list(range(1, 13)), "_d": 1})
+    months = pd.DataFrame({"month": list(range(1, 12 + 1)), "_d": 1})
     grid = (
         all_keys.merge(months, on="_d").drop(columns="_d")
-                .merge(df[group_cols + ["year", "month", value_col]], how="left")
+               .merge(df[group_cols + ["year", "month", value_col]], how="left")
     )
     grid[value_col] = grid[value_col].fillna(0.0)
+
     if max_yyyymm is not None:
         yyyymm = grid["year"].astype(int) * 100 + grid["month"].astype(int)
         grid = grid.loc[yyyymm <= max_yyyymm]
+
     def _spread(g):
         nz = sorted(g.loc[g[value_col] > 0, "month"].unique().tolist())
         if not nz:
             return g
-        if nz == [12]:  # annual dump
+        if nz == [12]:  # annual dump → spread evenly
             tot = float(g.loc[g["month"] == 12, value_col].sum())
             g[value_col] = tot / 12.0
         elif set(nz).issubset({6, 12}):  # half-year
@@ -1269,8 +1028,18 @@ def _redistribute_period_totals_monthly(
                 if q_tot > 0:
                     g.loc[g["month"].isin(months_in_q), value_col] = q_tot / 3.0
         return g
-    out = grid.groupby(group_cols + ["year"], group_keys=False).apply(_spread)
-    return out[group_cols + ["year", "month", value_col]]
+
+    # IMPORTANT: ensure grouping keys are returned as columns (not index)
+    out = (
+        grid
+        .groupby(group_cols + ["year"], group_keys=False, as_index=False)
+        .apply(_spread)
+        .reset_index(drop=True)
+    )
+
+    # Return only the expected columns, guaranteed to exist as columns
+    cols = list(group_cols) + ["year", "month", value_col]
+    return out.loc[:, cols]
 
 def common_series_cutoff(df: pd.DataFrame, series_col: str, value_col: str = "total_sales") -> int | None:
     """
@@ -1312,6 +1081,9 @@ def month_span_len(applied_month_range: tuple[str,str] | None) -> int:
     sy, sm = divmod(s, 100); ey, em = divmod(e, 100)
     return (ey - sy) * 12 + (em - sm) + 1
 
+import pandas as pd
+from pandas.api.types import CategoricalDtype
+
 def apply_trailing_ma(
     df: pd.DataFrame,
     *,
@@ -1334,7 +1106,7 @@ def apply_trailing_ma(
 
     # 1) Drop unused categories on all grouping cols (prevents empty groups)
     for c in group_cols:
-        if c in out.columns and pd.api.types.is_categorical_dtype(out[c]):
+        if c in out.columns and isinstance(out[c].dtype, CategoricalDtype):
             out[c] = out[c].cat.remove_unused_categories()
 
     # 2) Sort for stable rolling
@@ -1912,7 +1684,7 @@ def render_sales_competitive(
     # ---- monthly by OEM -------------------------------------------------
     monthly_oem = (
         scope
-        .groupby(["year", "month", "group_standardized"], as_index=False)["total_sales"]
+        .groupby(["year", "month", "group_standardized"], as_index=False, observed=True)["total_sales"]
         .sum()
     )
     max_cut = latest_available_yyyymm(scope)
@@ -1921,7 +1693,7 @@ def render_sales_competitive(
     )
 
     # keep logic (top list & whether to include "Other")
-    totals = monthly_oem.groupby("group_standardized")["total_sales"].sum().sort_values(ascending=False)
+    totals = monthly_oem.groupby("group_standardized", observed=True)["total_sales"].sum().sort_values(ascending=False)
 
     if applied_oems and len(applied_oems) >= 2:
         keep = [o for o in applied_oems if o in totals.index]
@@ -1970,28 +1742,7 @@ def render_sales_competitive(
 
     # titles
     global_flag = is_global(applied_regions, applied_countries)
-    title_line = make_title(
-        "Competitive Sales by OEM",
-        applied_oems=applied_oems,
-        applied_brands=[],
-        applied_regions=[] if global_flag else applied_regions,
-        applied_countries=applied_countries,
-        region_map=region_map,
-        applied_month_range=applied_month_range,
-        powertrains=chosen_pts or None,
-        where_override="Global" if global_flag else None,
-    )
-    title_bar = make_title(
-        "Monthly Sales by OEM (stacked)",
-        applied_oems=applied_oems,
-        applied_brands=[],
-        applied_regions=[] if global_flag else applied_regions,
-        applied_countries=applied_countries,
-        region_map=region_map,
-        applied_month_range=applied_month_range,
-        powertrains=chosen_pts or None,
-        where_override="Global" if global_flag else None,
-    )
+
 
     # ---------------------------- MULTI-MONTH ----------------------------
     if not single_month:
@@ -2742,17 +2493,7 @@ def render_share_competitive(
 
     # Titles
     global_flag = is_global(applied_regions, applied_countries)
-    title_line = make_title(
-        "Competitive Market Share by OEM",
-        applied_oems=applied_oems,
-        applied_brands=[],
-        applied_regions=[] if global_flag else applied_regions,
-        applied_countries=applied_countries,
-        region_map=region_map,
-        applied_month_range=applied_month_range,
-        powertrains=chosen_pts or None,
-        where_override="Global" if global_flag else None,
-    )
+
     title_delta = make_title(
         "Change in Market Share by OEM (first→last)",
         applied_oems=applied_oems,
@@ -2797,11 +2538,11 @@ def render_share_competitive(
                     where_override="Global" if global_flag else None,
                     ma_window=eff_win,
                 ),
-                custom_data=["total_sales","market_total"]
+                custom_data=["total_sales","market_total"]  # keep this
             )
+
             if eff_win:
                 fig_line.update_traces(
-                    customdata=np.c_[data_for_line["total_sales"], data_for_line["market_total"]],
                     hovertemplate=("Month: %{x|%m/%Y}<br>%{fullData.name}: %{y:.1%}"
                                 "<br>OEM Units: %{customdata[0]:,.0f}"
                                 "<br>Market Units: %{customdata[1]:,.0f}<extra></extra>")
