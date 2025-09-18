@@ -1,14 +1,22 @@
+# src/build_cache.py
+
 import re, gc
 from pathlib import Path
 import pandas as pd
 import numpy as np
 import json
 
+# NEW: import the China sales loader you created
+from build_china_long import load_china_sales_long
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
 CACHE    = Path(__file__).resolve().parents[1] / ".cache" / "long.parquet"
 RAW_DIR  = DATA_DIR
 MANIFEST = CACHE.with_suffix(".manifest.json")
+
+# NEW: where the China Registration + optional extra mapping live
+CHINA_REG_PATH = DATA_DIR / "China Auto Registration.xlsx"
+CHINA_EXTRA_MAP = DATA_DIR / "unmapped_names_new.xlsx"  # ok if missing
 
 def _parse_years(path: Path):
     """
@@ -38,7 +46,7 @@ def process_file(path: Path):
     chunks = []
     for sheet in xls.sheet_names:
         df = pd.read_excel(xls, sheet_name=sheet, header=1)
-        if df is None or df.empty: 
+        if df is None or df.empty:
             continue
         df.columns = (df.columns.astype(str).str.strip().str.lower()
                       .str.replace(" ", "_").str.replace("/", "_"))
@@ -70,6 +78,55 @@ def process_file(path: Path):
         return pd.DataFrame()
     return pd.concat(chunks, ignore_index=True)
 
+def _append_china_sales(long_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove China rows from Autos_*_Seg and append China SALES from the
+    Registration workbook (via build_china_long.load_china_sales_long).
+    """
+    # 1) Drop any existing China rows coming from Autos_*_Seg
+    if "country" in long_df.columns:
+        not_china = long_df["country"].str.strip().str.lower() != "china"
+        long_df = long_df.loc[not_china].copy()
+
+    # 2) Load China sales (Registration workbook) and harmonize columns
+    extra_map_arg = str(CHINA_EXTRA_MAP) if CHINA_EXTRA_MAP.exists() else None
+    china_sales = load_china_sales_long(str(CHINA_REG_PATH), extra_mapping_path=extra_map_arg)
+    # china_sales columns: Group, Maker/Brand, Type, Segment, Model, Powertrain, yyyymm, units (+ Region/Country)
+
+    china_part = china_sales.rename(columns={
+        "Group": "group",
+        "Maker/Brand": "maker_brand",
+        "Powertrain": "powertrain",
+        "yyyymm": "yyyymm",
+        "units": "total_sales",
+        "Country": "country",
+    }).copy()
+
+    # Normalize fields used downstream
+    china_part["powertrain_simplified"] = china_part["powertrain"].map(simplify_powertrain)
+    china_part["yyyymm"] = china_part["yyyymm"].astype(int).astype(str)
+    china_part["total_sales"] = pd.to_numeric(china_part["total_sales"], errors="coerce").fillna(0.0)
+
+    china_part["year"]  = china_part["yyyymm"].str[:4].astype(int)
+    china_part["month"] = china_part["yyyymm"].str[4:].astype(int)
+    china_part["month_dt"] = pd.to_datetime(china_part["yyyymm"], format="%Y%m")
+    china_part["month_label"] = china_part["month_dt"].dt.strftime("%m/%Y")
+
+    # keep only columns that exist in main df, fill any missing
+    for col in long_df.columns:
+        if col not in china_part.columns:
+            if col in ("group","maker_brand","country","powertrain","powertrain_simplified"):
+                china_part[col] = None
+            elif col in ("total_sales",):
+                china_part[col] = 0.0
+            else:
+                china_part[col] = pd.NA
+
+    china_part = china_part[long_df.columns]
+
+    # 3) Append and return
+    return pd.concat([long_df, china_part], ignore_index=True)
+
 def main():
     files = sorted(DATA_DIR.glob("*.xlsx"), key=_parse_years)  # lexical order
     if not files:
@@ -87,6 +144,14 @@ def main():
         raise ValueError("No usable sheets (no YYYYMM columns).")
 
     long = pd.concat(all_parts, ignore_index=True)
+
+    # >>> NEW: swap in China SALES from Registration workbook
+    try:
+        long = _append_china_sales(long)
+        print("China override applied from:", CHINA_REG_PATH)
+    except Exception as e:
+        print("WARNING: China override failed; keeping Autos_*_Seg China rows.", e)
+
     CACHE.parent.mkdir(parents=True, exist_ok=True)
     long.to_parquet(CACHE, index=False)
     print("Wrote cache:", CACHE, "rows:", len(long))
